@@ -496,6 +496,9 @@ async function saveAlertSettings(req, res) {
   if (input.telegramEnabled && !String(input.telegramToken || '').trim() && !current?.telegramConfigured) {
     return res.status(400).json({ code: 400, message: '启用 Telegram 时必须填写 Bot Token' });
   }
+  if (input.barkEnabled && !input.telegramEnabled) {
+    return res.status(400).json({ code: 400, message: 'Bark 仅作为 Telegram 发送失败时的备用通道，请先启用 Telegram' });
+  }
   if (input.barkEnabled && !/^https:\/\//i.test(String(input.barkServerUrl || ''))) {
     return res.status(400).json({ code: 400, message: 'Bark 服务地址必须使用 HTTPS' });
   }

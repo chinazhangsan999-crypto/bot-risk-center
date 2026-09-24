@@ -128,23 +128,30 @@ function rebuildQueues(settings) {
 async function deliver(item, settings, { testProvider = '' } = {}) {
   const message = item.message || describeAlert(item);
   const title = item.title || (item.recovered ? '风险中心恢复通知' : `风险中心${item.severity === 'critical' ? '紧急' : '风险'}告警`);
-  const providers = testProvider ? [testProvider] : [
-    ...(settings.telegramEnabled ? ['telegram'] : []),
-    ...(settings.barkEnabled ? ['bark'] : [])
-  ];
   const results = [];
-  for (const provider of providers) {
+  const send = async provider => {
     try {
       const outcome = provider === 'telegram'
         ? await telegramQueue({ settings, message })
         : await barkQueue({ settings, title, message });
       const result = { alertKey: item.key, provider, success: true, ...outcome };
       await StorageService.recordAlertDelivery(result); results.push(result);
+      return result;
     } catch (error) {
       const result = { alertKey: item.key, provider, success: false, statusCode: error.statusCode, error: error.message };
       await StorageService.recordAlertDelivery(result); results.push(result);
+      return result;
     }
+  };
+
+  if (testProvider) {
+    await send(testProvider);
+    return results;
   }
+
+  if (!settings.telegramEnabled) return results;
+  const telegramResult = await send('telegram');
+  if (!telegramResult.success && settings.barkEnabled) await send('bark');
   return results;
 }
 
@@ -209,7 +216,7 @@ async function test(provider) {
 
 async function notifyUpstreamUpdates(projects) {
   const settings = await StorageService.getAlertSettings({ includeSecrets: true });
-  if (!settings?.enabled || !settings.upstreamUpdateAlertEnabled || (!settings.telegramEnabled && !settings.barkEnabled)) return false;
+  if (!settings?.enabled || !settings.upstreamUpdateAlertEnabled || !settings.telegramEnabled) return false;
   rebuildQueues(settings);
   const lines = ['检测到上游项目发布新版本：'];
   for (const item of projects) {

@@ -16,6 +16,39 @@ test('Telegram 与 Bark 文本截断不会切断 Unicode 字符', () => {
   assert.match(bark, /进入后台查看$/);
 });
 
+test('正式告警仅在 Telegram 失败时回退到 Bark', async () => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async url => {
+    const requestUrl = String(url);
+    requests.push(requestUrl);
+    const telegramAttempt = requests.filter(item => item.includes('api.telegram.org')).length;
+    if (requestUrl.includes('api.telegram.org') && telegramAttempt === 2) {
+      return { ok: false, status: 502, text: async () => 'telegram failed' };
+    }
+    return { ok: true, status: 200, text: async () => 'ok' };
+  };
+  const StorageService = require('../src/services/StorageService');
+  const originalRecordDelivery = StorageService.recordAlertDelivery;
+  StorageService.recordAlertDelivery = async () => undefined;
+  const settings = {
+    telegramEnabled: true, telegramToken: 'test-token', telegramChatId: 'test-chat',
+    barkEnabled: true, barkDeviceKey: 'test-key', barkServerUrl: 'https://api.day.app', barkGroup: 'test'
+  };
+  try {
+    let results = await AlertService.deliver({ key: 'success', message: 'ok' }, settings);
+    assert.deepEqual(results.map(item => item.provider), ['telegram']);
+    assert.equal(requests.filter(item => item.includes('api.day.app')).length, 0);
+
+    results = await AlertService.deliver({ key: 'fallback', message: 'fallback' }, settings);
+    assert.deepEqual(results.map(item => [item.provider, item.success]), [['telegram', false], ['bark', true]]);
+    assert.equal(requests.filter(item => item.includes('api.day.app')).length, 1);
+  } finally {
+    global.fetch = originalFetch;
+    StorageService.recordAlertDelivery = originalRecordDelivery;
+  }
+});
+
 test('渠道发送队列遵守最小间隔并保持串行', async () => {
   const starts = [];
   const queue = AlertService.createRateQueue(40, async value => {
