@@ -358,6 +358,30 @@ td.version-stack small { color: var(--muted); }
 .identity-table .action-column { display: flex; flex-wrap: wrap; gap: 6px; }
 .identity-pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-top: 1px solid var(--border); color: var(--muted); }
 .identity-pagination .button-row { align-items: center; }
+.manual-rules-section { padding-bottom: 4px; }
+.manual-rules-section .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px; }
+.manual-rules-section .section-heading h3 { margin: 0 0 4px; }
+.manual-rule-editor { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; padding: 0 18px 18px; }
+.manual-rule-editor label, .manual-rule-filters label { display: grid; gap: 6px; min-width: 0; font-weight: 700; color: var(--text); }
+.manual-rule-target-field, .manual-rule-reason-field { grid-column: span 2; }
+.manual-rule-error { color: var(--danger); }
+.manual-rule-error, .manual-rule-editor > .form-note, .manual-rule-editor .form-actions { grid-column: 1 / -1; margin: 0; }
+.manual-rule-editor .form-actions { justify-content: flex-end; }
+.manual-rule-filters { display: grid; grid-template-columns: repeat(5,minmax(120px,1fr)) minmax(220px,1.5fr); gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--surface-muted); }
+.manual-rules-table-wrap { margin: 0; }
+.manual-rules-table { table-layout: fixed; min-width: 1180px; }
+.manual-rules-table th:nth-child(1) { width: 140px; }
+.manual-rules-table th:nth-child(2) { width: 150px; }
+.manual-rules-table th:nth-child(3) { width: 230px; }
+.manual-rules-table th:nth-child(4) { width: 150px; }
+.manual-rules-table th:nth-child(5) { width: 175px; }
+.manual-rules-table th:nth-child(7) { width: 145px; }
+.manual-rules-table th:nth-child(8) { width: 220px; }
+.manual-rules-table td { vertical-align: top; white-space: pre-line; overflow-wrap: anywhere; }
+.manual-rules-table .action-column { display: flex; flex-wrap: wrap; gap: 6px; }
+.manual-rule-pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-top: 1px solid var(--border); color: var(--muted); }
+.manual-rule-pagination .button-row { align-items: center; }
+.manual-rules-section .revision-panel { margin: 16px 18px 18px; }
 .policy-release { margin: 0 18px 18px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
 .policy-release > div:first-child { margin-bottom: 12px; }
 .policy-release h3 { margin: 0 0 4px; }
@@ -408,6 +432,8 @@ td code { display: block; margin-top: 4px; color: var(--primary); font-size: 12p
   input, select, textarea, .button, .tab { min-height: 44px; }
   .identity-editor { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .identity-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .manual-rule-editor { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .manual-rule-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 
 @media (max-width: 520px) {
@@ -444,6 +470,17 @@ td code { display: block; margin-top: 4px; color: var(--primary); font-size: 12p
   .identity-table .action-column { display: flex; padding-top: 10px; }
   .identity-table .action-column::before { display: none; }
   .identity-pagination { align-items: flex-start; flex-direction: column; }
+  .manual-rule-editor, .manual-rule-filters { grid-template-columns: 1fr; }
+  .manual-rule-target-field, .manual-rule-reason-field { grid-column: 1; }
+  .manual-rules-table { min-width: 0; }
+  .manual-rules-table thead { display: none; }
+  .manual-rules-table tbody, .manual-rules-table tr, .manual-rules-table td { display: block; width: 100%; }
+  .manual-rules-table tr { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .manual-rules-table td { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 7px 0; border: 0; }
+  .manual-rules-table td::before { content: attr(data-label); color: var(--muted); font-weight: 700; }
+  .manual-rules-table .action-column { display: flex; padding-top: 10px; }
+  .manual-rules-table .action-column::before { display: none; }
+  .manual-rule-pagination { align-items: flex-start; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -16,7 +16,7 @@ test('识别质量与链路健康合并到导航站接入，名单合并到人�
   }
   assert.doesNotMatch(html, /data-tab="quality"/);
   assert.match(html, /panel-connections[\s\S]+quality-pass-rate[\s\S]+pipeline-body/);
-  assert.match(html, /panel-rules[\s\S]+identity-rules-section/);
+  assert.match(html, /panel-rules/);
   assert.doesNotMatch(html.match(/id="panel-detection"[^\n]*/)?.[0] || '', /identity-form/);
   assert.match(html, /detection-body/);
   assert.match(html, /quality-pass-rate/);
@@ -27,7 +27,8 @@ test('识别质量与链路健康合并到导航站接入，名单合并到人�
   assert.match(html, /revoke-all-sessions/);
   assert.match(script, /loadDetection/);
   assert.match(script, /loadQuality/);
-  assert.match(script, /loadIdentityLists/);
+  assert.match(script, /installManualRuleControls/);
+  assert.match(script, /loadRules/);
   assert.match(script, /loadSecurity/);
   assert.match(routes, /detection\/capabilities/);
   assert.match(routes, /security\/credentials/);
@@ -73,17 +74,23 @@ test('导航站把关键正负机器人信号接入风险中心', () => {
   assert.match(concurrency, /high_concurrency/);
 });
 
-test('人工名单支持筛选分页、编辑启停、命中统计和冲突保护', () => {
+test('人工规则统一支持筛选分页、编辑启停、命中统计和冲突保护', () => {
   const script = fs.readFileSync(path.join(root, 'public', 'admin.js'), 'utf8');
   const routes = fs.readFileSync(path.join(root, 'src', 'routes', 'index.js'), 'utf8');
   const storage = fs.readFileSync(path.join(root, 'src', 'services', 'StorageService.js'), 'utf8');
   const migration = fs.readFileSync(path.join(root, 'migrations', '009_identity_controls.sql'), 'utf8');
-  for (const marker of ['identity-filter-list', 'identity-filter-site', 'identity-filter-keyword', 'identity-prev', 'edit-identity', 'toggle-identity']) assert.match(script, new RegExp(marker));
-  assert.match(routes, /identity-lists\/:listType\/:id\/toggle/);
-  assert.match(routes, /router\.put\('\/admin\/api\/detection\/identity-lists/);
+  for (const marker of ['manual-rule-filter-type', 'manual-rule-filter-site', 'manual-rule-filter-keyword', 'manual-rule-prev', 'edit-manual-rule', 'toggle-manual-rule']) assert.match(script, new RegExp(marker));
+  assert.match(routes, /router\.get\('\/admin\/api\/manual-rules'/);
+  assert.match(routes, /manual-rules\/:kind\/:id\/status/);
+  assert.doesNotMatch(routes, /admin\/api\/risk\/rules/);
+  assert.doesNotMatch(routes, /admin\/api\/detection\/identity-lists/);
+  assert.match(storage, /listManualRules/);
+  assert.match(storage, /moveIdentityRule/);
   assert.match(storage, /IDENTITY_CONFLICT/);
   assert.match(storage, /hit_count=hit_count\+1/);
   assert.match(migration, /ADD COLUMN IF NOT EXISTS enabled/);
   assert.match(migration, /omrilotan\/isbot/);
   assert.match(migration, /redis\/node-redis/);
+  const unifiedMigration = fs.readFileSync(path.join(root, 'migrations', '012_unified_manual_rules.sql'), 'utf8');
+  assert.match(unifiedMigration, /ADD COLUMN IF NOT EXISTS updated_at/);
 });

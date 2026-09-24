@@ -16,13 +16,14 @@ test('疑似访客界面展示原因与信号，并支持永久处置和全站�
   assert.match(html, /suspect-permanent[\s\S]+永久处置/);
   assert.match(html, /suspect-apply-all-sites[\s\S]+所有站点/);
   assert.match(html, /suspect-rule-signal/);
-  assert.match(html, /rule-scope[\s\S]+任意站点/);
-  assert.match(html, /rule-permanent[\s\S]+命中后永久处置/);
+  assert.match(script, /installManualRuleControls/);
+  assert.match(script, /manual-rule-type[\s\S]+访客身份/);
+  assert.match(script, /manual-rule-validity[\s\S]+永久/);
   assert.match(script, /scoreImpact[\s\S]+signalLabel/);
   assert.match(script, /signalExplanations[\s\S]+为什么可疑|signalExplanations[\s\S]+更像脚本/);
   assert.match(script, /dataCopySignal|copySignal/);
   assert.match(script, /applyToAllSites[\s\S]+ruleSignal/);
-  assert.match(script, /siteKey = .*\? '\*'/);
+  assert.match(script, /siteKey: \$\('manual-rule-site'\)\.value/);
   assert.match(storage, /site_key = \$1 OR site_key = '\*'/);
   assert.match(storage, /expires_at IS NULL OR expires_at > NOW\(\)/);
   assert.match(storage, /create_signal_rule_from_visitor/);

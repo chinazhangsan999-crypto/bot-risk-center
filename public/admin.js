@@ -4,7 +4,7 @@
   const validTabs = new Set(['connections', 'suspects', 'detection', 'rules', 'alerts', 'maintenance', 'security', 'audits']);
   const requestedTab = window.location.hash.replace(/^#/, '');
   const initialTab = requestedTab === 'quality' ? 'connections' : (validTabs.has(requestedTab) ? requestedTab : 'connections');
-  const state = { csrf: '', sites: [], suspectPage: 1, suspectTotal: 0, suspectItems: [], selectedSuspects: new Set(), currentSuspect: null, activeTab: initialTab, riskRange: '24h', identityPage: 1, identityTotal: 0, identityItems: [], editingIdentity: null, maintenanceItems: [], maintenanceScope: 'all' };
+  const state = { csrf: '', sites: [], suspectPage: 1, suspectTotal: 0, suspectItems: [], selectedSuspects: new Set(), currentSuspect: null, activeTab: initialTab, riskRange: '24h', manualRulePage: 1, manualRuleTotal: 0, manualRuleItems: [], editingManualRule: null, maintenanceItems: [], maintenanceScope: 'all' };
   const signalLabels = Object.freeze({
     cloudflare_confirmed_bot: 'Cloudflare 已确认机器人', verified_search_bot: '已验证搜索引擎蜘蛛', search_bot_spoofed: '搜索蜘蛛身份不一致',
     known_ai_crawler: '已知 AI 爬虫', token_replay: '读取凭证重放', sequential_detail_scan: '连续枚举详情页',
@@ -90,28 +90,76 @@
     input.before(row);
     row.append(input, button);
   }
-  function installIdentityControls() {
-    const form = $('identity-form'); const section = form.closest('.panel-subsection');
-    section.classList.add('identity-section'); form.classList.remove('inline-form'); form.classList.add('identity-editor');
-    section.querySelector('.subtle').textContent = '单站规则优先于全站规则；同一范围的同一对象不能同时允许和阻止。UA、ASN、JA4 等弱身份不建议单独永久拒绝。';
-    const subject = $('identity-subject'); const help = node('small', '填写风险中心显示的访客摘要，区分大小写。'); help.id = 'identity-subject-help'; subject.after(help);
-    const duration = $('identity-duration'); const durationLabel = duration.closest('label'); durationLabel.classList.add('identity-duration-field');
-    const validity = document.createElement('select'); validity.id = 'identity-validity';
-    for (const [value, label] of [['60','60 分钟'],['1440','24 小时'],['10080','7 天'],['custom','自定义'],['0','永久']]) { const option = node('option', label); option.value = value; validity.append(option); }
-    durationLabel.firstChild.textContent = '有效期'; duration.before(validity); duration.hidden = true;
-    $('identity-permanent').closest('label').hidden = true;
-    const error = node('p', '', 'form-note identity-error'); error.id = 'identity-form-error'; error.setAttribute('role', 'alert');
-    const actions = form.querySelector('.form-actions'); actions.before(error);
-    const submit = actions.querySelector('button[type="submit"]'); submit.id = 'identity-submit';
-    const cancel = actionButton('取消编辑', 'cancel-identity'); cancel.id = 'identity-cancel-edit'; cancel.hidden = true; actions.prepend(cancel);
-    const filters = node('div', '', 'identity-filters');
-    const filterDefs = [['identity-filter-list','名单',[['','全部'],['allow','允许'],['block','阻止']]],['identity-filter-site','站点',[['','全部站点'],['*','所有站点规则']]],['identity-filter-subject','对象',[['','全部类型'],['visitor','访客摘要'],['bot_identity','机器人身份'],['ua','User-Agent'],['ja4','JA4'],['asn','ASN']]],['identity-filter-status','状态',[['','全部'],['enabled','启用'],['disabled','停用']]]];
-    for (const [id,labelText,options] of filterDefs) { const label=node('label', labelText); const select=document.createElement('select'); select.id=id; for(const [value,text] of options){const option=node('option',text); option.value=value; select.append(option);} label.append(select); filters.append(label); }
-    const keywordLabel=node('label','搜索','identity-keyword'); const keyword=document.createElement('input'); keyword.id='identity-filter-keyword'; keyword.maxLength=120; keyword.placeholder='对象值或原因'; keywordLabel.append(keyword); filters.append(keywordLabel);
-    const tableWrap = section.querySelector('.table-wrap'); tableWrap.classList.add('identity-table-wrap'); tableWrap.before(filters);
-    const table=tableWrap.querySelector('table'); table.classList.add('identity-table'); table.querySelector('thead tr').replaceChildren(...['名单 / 状态','范围','对象','有效期','原因','命中','操作'].map(text=>node('th',text)));
-    const pagination=node('div','','identity-pagination'); const summary=node('span','共 0 条'); summary.id='identity-page-summary'; const buttons=node('div','','button-row');
-    const prev=actionButton('上一页','identity-prev'); prev.id='identity-prev'; const page=node('span','1 / 1'); page.id='identity-page'; const next=actionButton('下一页','identity-next'); next.id='identity-next'; buttons.append(prev,page,next); pagination.append(summary,buttons); tableWrap.after(pagination);
+  function field(labelText, control, className = '') {
+    const label = node('label', labelText, className); label.append(control); return label;
+  }
+  function selectControl(id, options) {
+    const select = document.createElement('select'); select.id = id;
+    for (const [value, label] of options) { const option = node('option', label); option.value = value; select.append(option); }
+    return select;
+  }
+  function installManualRuleControls() {
+    const panel = $('panel-rules');
+    const panelHead = panel.querySelector('.panel-head');
+    const policy = panel.querySelector('.policy-release');
+    for (const child of [...panel.children]) if (child !== panelHead && child !== policy) child.remove();
+    $('identity-rules-section')?.remove();
+
+    const section = node('section', '', 'panel-subsection manual-rules-section');
+    const header = node('div', '', 'section-heading');
+    const headingCopy = node('div'); headingCopy.append(node('h3', '人工规则管理'), node('p', '信号规则、人工允许和人工阻止统一在这里管理；同一对象不会同时存在相反处置。', 'subtle'));
+    header.append(headingCopy);
+
+    const form = document.createElement('form'); form.id = 'manual-rule-form'; form.className = 'manual-rule-editor';
+    const type = selectControl('manual-rule-type', [['signal','风险信号'],['identity','访客身份']]);
+    const site = selectControl('manual-rule-site', [['*','所有站点']]);
+    const targetType = selectControl('manual-rule-target-type', [['signal','风险信号']]);
+    const targetValue = document.createElement('input'); targetValue.id = 'manual-rule-target-value'; targetValue.maxLength = 512; targetValue.required = true;
+    const action = selectControl('manual-rule-action', []);
+    const mode = selectControl('manual-rule-mode', [['enforce','正式执行'],['shadow','仅观察']]);
+    const validity = selectControl('manual-rule-validity', [['60','60 分钟'],['1440','24 小时'],['10080','7 天'],['custom','自定义'],['0','永久']]);
+    const duration = document.createElement('input'); duration.id = 'manual-rule-duration'; duration.type = 'number'; duration.min = '1'; duration.max = '43200'; duration.value = '60'; duration.hidden = true;
+    const reason = document.createElement('input'); reason.id = 'manual-rule-reason'; reason.maxLength = 300; reason.required = true; reason.placeholder = '至少填写 2 个字，便于复核';
+    const error = node('p', '', 'form-note manual-rule-error'); error.id = 'manual-rule-form-error'; error.setAttribute('role', 'alert');
+    const previewResult = node('p', '', 'form-note'); previewResult.id = 'manual-rule-preview-result'; previewResult.setAttribute('aria-live', 'polite');
+    const actions = node('div', '', 'form-actions');
+    const preview = actionButton('预估影响', 'preview-manual-rule'); preview.id = 'preview-manual-rule';
+    const cancel = actionButton('取消编辑', 'cancel-manual-rule'); cancel.id = 'manual-rule-cancel-edit'; cancel.hidden = true;
+    const submit = node('button', '保存规则', 'button primary'); submit.id = 'manual-rule-submit'; submit.type = 'submit';
+    actions.append(preview, cancel, submit);
+    form.append(
+      field('匹配方式', type), field('作用范围', site), field('对象类型', targetType),
+      field('匹配值', targetValue, 'manual-rule-target-field'), field('处理动作', action),
+      field('执行方式', mode, 'manual-rule-mode-field'), field('期限 / 处置时长', validity),
+      field('自定义分钟数', duration, 'manual-rule-duration-field'), field('设置原因', reason, 'manual-rule-reason-field'),
+      error, previewResult, actions
+    );
+
+    const filters = node('div', '', 'manual-rule-filters');
+    const filterDefs = [
+      ['manual-rule-filter-type','规则类型',[['','全部'],['signal','风险信号'],['identity','访客身份']]],
+      ['manual-rule-filter-action','处理动作',[['','全部'],['allow','允许'],['block','阻止'],['observe','观察'],['silent_challenge','静默验证'],['strong_challenge','强验证'],['deny','拒绝']]],
+      ['manual-rule-filter-site','站点',[['','全部站点'],['*','所有站点规则']]],
+      ['manual-rule-filter-target','对象类型',[['','全部'],['signal','风险信号'],['visitor','访客摘要'],['bot_identity','机器人身份'],['ua','User-Agent'],['ja4','JA4'],['asn','ASN']]],
+      ['manual-rule-filter-status','状态',[['','全部'],['enabled','启用'],['disabled','停用'],['expired','已到期']]]
+    ];
+    for (const [id, label, options] of filterDefs) filters.append(field(label, selectControl(id, options)));
+    const keyword = document.createElement('input'); keyword.id = 'manual-rule-filter-keyword'; keyword.maxLength = 120; keyword.placeholder = '匹配值、原因或站点'; filters.append(field('搜索', keyword));
+
+    const tableWrap = node('div', '', 'table-wrap manual-rules-table-wrap');
+    const table = document.createElement('table'); table.className = 'manual-rules-table';
+    const thead = document.createElement('thead'); const headingRow = document.createElement('tr');
+    for (const text of ['类型 / 状态','范围','匹配对象','动作 / 模式','期限 / 处置时长','原因','命中','操作']) headingRow.append(node('th', text));
+    thead.append(headingRow); const tbody = document.createElement('tbody'); tbody.id = 'manual-rules-body'; table.append(thead, tbody); tableWrap.append(table);
+    const pagination = node('div', '', 'manual-rule-pagination'); const summary = node('span', '共 0 条'); summary.id = 'manual-rule-page-summary'; const pager = node('div', '', 'button-row');
+    const prev = actionButton('上一页', 'manual-rule-prev'); prev.id = 'manual-rule-prev'; const page = node('span', '1 / 1'); page.id = 'manual-rule-page'; const next = actionButton('下一页', 'manual-rule-next'); next.id = 'manual-rule-next'; pager.append(prev, page, next); pagination.append(summary, pager);
+
+    const revisions = document.createElement('details'); revisions.className = 'revision-panel'; const revisionsSummary = node('summary', '查看风险信号规则修订记录');
+    const revisionsWrap = node('div', '', 'table-wrap'); const revisionsTable = document.createElement('table'); const revisionsHead = document.createElement('thead'); const revisionsHeadRow = document.createElement('tr');
+    for (const text of ['时间','规则','操作','快照']) revisionsHeadRow.append(node('th', text));
+    revisionsHead.append(revisionsHeadRow); const revisionsBody = document.createElement('tbody'); revisionsBody.id = 'rule-revisions-body'; revisionsTable.append(revisionsHead, revisionsBody); revisionsWrap.append(revisionsTable); revisions.append(revisionsSummary, revisionsWrap);
+
+    section.append(header, form, filters, tableWrap, pagination, revisions); panel.append(section);
   }
   function installMaintenanceScopeFilter() {
     const legend = document.querySelector('#panel-maintenance .maintenance-legend');
@@ -178,27 +226,27 @@
 
   function setAuthenticated(value) { $('login-view').hidden = value; $('dashboard-view').hidden = !value; }
   function fillSiteSelects() {
-    for (const select of [$('suspect-site-filter'), $('rule-site')]) {
+    for (const select of [$('suspect-site-filter')]) {
       const current = select.value;
-      const first = select.id === 'suspect-site-filter' ? node('option', '全部站点') : node('option', '请选择站点');
+      const first = node('option', '全部站点');
       first.value = '';
       select.replaceChildren(first, ...state.sites.map(site => { const option = node('option', site.name || site.siteKey); option.value = site.siteKey; return option; }));
       select.value = current;
     }
-    const identitySite = $('identity-site');
-    if (identitySite) {
-      const current = identitySite.value || '*';
+    const manualSite = $('manual-rule-site');
+    if (manualSite) {
+      const current = manualSite.value || '*';
       const all = node('option', '所有站点'); all.value = '*';
-      identitySite.replaceChildren(all, ...state.sites.map(site => { const option = node('option', site.name || site.siteKey); option.value = site.siteKey; return option; }));
-      identitySite.value = current;
+      manualSite.replaceChildren(all, ...state.sites.map(site => { const option = node('option', site.name || site.siteKey); option.value = site.siteKey; return option; }));
+      manualSite.value = current;
     }
-    const identityFilterSite = $('identity-filter-site');
-    if (identityFilterSite) {
-      const current = identityFilterSite.value;
+    const manualFilterSite = $('manual-rule-filter-site');
+    if (manualFilterSite) {
+      const current = manualFilterSite.value;
       const all = node('option', '全部站点'); all.value = '';
       const global = node('option', '所有站点规则'); global.value = '*';
-      identityFilterSite.replaceChildren(all, global, ...state.sites.map(site => { const option = node('option', site.name || site.siteKey); option.value = site.siteKey; return option; }));
-      identityFilterSite.value = current;
+      manualFilterSite.replaceChildren(all, global, ...state.sites.map(site => { const option = node('option', site.name || site.siteKey); option.value = site.siteKey; return option; }));
+      manualFilterSite.value = current;
     }
     const driveSites = $('drive-sites');
     if (driveSites) {
@@ -301,21 +349,18 @@
   }
 
   async function loadRules() {
-    const [result, revisions, policies] = await Promise.all([request('/admin/api/risk/rules'), request('/admin/api/risk/rules/revisions?limit=100'), request('/admin/api/risk/policies')]);
-    const body = $('rules-body'); body.replaceChildren();
-    if (!result.data.length) emptyRow(body, '尚未配置人工信号规则。', 7);
-    for (const rule of result.data) {
-      const tr = node('tr'); tr.dataset.ruleId = rule.id;
-      const actions = node('td', '', 'action-column'); const group = node('div', '', 'inline-actions');
-      group.append(actionButton(rule.enabled ? '停用' : '启用', 'toggle-rule', rule.enabled ? 'danger' : 'success'), actionButton('删除', 'delete-rule', 'danger')); actions.append(group);
-      tr.append(node('td', rule.scope === 'all' ? '任意站点' : rule.siteName), node('td', `${signalLabel(rule.signal)}\n${rule.signal}`), node('td', rule.action), node('td', rule.mode === 'shadow' ? '影子观察' : '正式执行'), node('td', rule.permanent ? '永久' : `${rule.durationMinutes} 分钟`), node('td', rule.enabled ? '已启用' : '已停用'), actions); body.append(tr);
-    }
+    const [rules, revisions, policies] = await Promise.all([
+      request(`/admin/api/manual-rules?${manualRuleQuery()}`),
+      request('/admin/api/manual-rules/revisions?limit=100'),
+      request('/admin/api/risk/policies')
+    ]);
+    renderManualRules(rules.data || { items: [], total: 0, page: 1, pageSize: 100 });
     const revisionsBody = $('rule-revisions-body'); revisionsBody.replaceChildren();
-    if (!revisions.data.length) emptyRow(revisionsBody, '尚无规则修订记录。', 5);
+    if (!revisions.data.length) emptyRow(revisionsBody, '尚无风险信号规则修订记录。', 4);
     for (const item of revisions.data) {
       const snapshot = item.snapshot || {};
       const tr = node('tr'); tr.append(node('td', formatDate(item.createdAt)), node('td', String(item.ruleId || '—')),
-        node('td', item.operation), node('td', item.createdBy), node('td', `${snapshot.signal || '—'} · ${snapshot.action || '—'} · ${snapshot.mode || 'enforce'}`));
+        node('td', item.operation), node('td', `${snapshot.signal || '—'} · ${manualActionLabel(snapshot.action)} · ${snapshot.mode === 'shadow' ? '仅观察' : '正式执行'}`));
       revisionsBody.append(tr);
     }
     const policiesBody = $('policies-body'); policiesBody.replaceChildren();
@@ -329,19 +374,91 @@
     }
   }
 
-  function identityQuery() {
-    const params = new URLSearchParams({ page: state.identityPage, pageSize: 100 });
-    for (const [key, id] of [['listType', 'identity-filter-list'], ['siteKey', 'identity-filter-site'], ['subjectType', 'identity-filter-subject'], ['status', 'identity-filter-status'], ['keyword', 'identity-filter-keyword']]) {
+  function manualRuleQuery() {
+    const params = new URLSearchParams({ page: state.manualRulePage, pageSize: 100 });
+    for (const [key, id] of [['ruleType','manual-rule-filter-type'],['action','manual-rule-filter-action'],['siteKey','manual-rule-filter-site'],['targetType','manual-rule-filter-target'],['status','manual-rule-filter-status'],['keyword','manual-rule-filter-keyword']]) {
       if ($(id)?.value.trim()) params.set(key, $(id).value.trim());
     }
     return params.toString();
   }
 
-  function resetIdentityEditor() {
-    state.editingIdentity = null; $('identity-form').reset(); $('identity-duration').value = '60';
-    $('identity-list-type').disabled = false; $('identity-validity').value = '60'; $('identity-duration').hidden = true;
-    $('identity-permanent').checked = false; $('identity-duration').disabled = false;
-    $('identity-form-error').textContent = ''; $('identity-submit').textContent = '保存名单项'; $('identity-cancel-edit').hidden = true;
+  function manualActionLabel(value) {
+    return ({ allow: '允许', block: '阻止', observe: '观察', silent_challenge: '静默验证', strong_challenge: '强验证', deny: '拒绝' })[value] || value || '—';
+  }
+  function manualTargetLabel(value) {
+    return ({ signal: '风险信号', visitor: '访客摘要', bot_identity: '机器人身份', ua: 'User-Agent', ja4: 'JA4', asn: 'ASN' })[value] || value;
+  }
+  function updateManualRuleEditor() {
+    const type = $('manual-rule-type').value;
+    const isSignal = type === 'signal';
+    const targetOptions = isSignal
+      ? [['signal','风险信号']]
+      : [['visitor','访客摘要'],['bot_identity','机器人身份'],['ua','User-Agent'],['ja4','JA4'],['asn','ASN']];
+    const actionOptions = isSignal
+      ? [['allow','允许'],['observe','观察'],['silent_challenge','静默验证'],['strong_challenge','强验证'],['deny','拒绝']]
+      : [['allow','允许'],['block','阻止']];
+    const currentTarget = $('manual-rule-target-type').value; const currentAction = $('manual-rule-action').value;
+    $('manual-rule-target-type').replaceChildren(...targetOptions.map(([value,label]) => { const option=node('option',label); option.value=value; return option; }));
+    $('manual-rule-action').replaceChildren(...actionOptions.map(([value,label]) => { const option=node('option',label); option.value=value; return option; }));
+    if (targetOptions.some(([value]) => value === currentTarget)) $('manual-rule-target-type').value = currentTarget;
+    if (actionOptions.some(([value]) => value === currentAction)) $('manual-rule-action').value = currentAction;
+    document.querySelector('.manual-rule-mode-field').hidden = !isSignal;
+    $('preview-manual-rule').hidden = !isSignal;
+    $('manual-rule-duration').max = isSignal ? '43200' : '525600';
+    $('manual-rule-type').disabled = Boolean(state.editingManualRule);
+  }
+  function resetManualRuleEditor() {
+    state.editingManualRule = null; $('manual-rule-form').reset(); $('manual-rule-type').value = 'signal';
+    $('manual-rule-site').value = '*'; $('manual-rule-validity').value = '60'; $('manual-rule-duration').value = '60'; $('manual-rule-duration').hidden = true;
+    $('manual-rule-form-error').textContent = ''; $('manual-rule-preview-result').textContent = ''; $('manual-rule-submit').textContent = '保存规则'; $('manual-rule-cancel-edit').hidden = true;
+    updateManualRuleEditor();
+  }
+  function manualRulePayload() {
+    const validity = $('manual-rule-validity').value;
+    return {
+      ruleType: $('manual-rule-type').value, siteKey: $('manual-rule-site').value,
+      targetType: $('manual-rule-target-type').value, targetValue: $('manual-rule-target-value').value.trim(),
+      action: $('manual-rule-action').value, mode: $('manual-rule-mode').value,
+      permanent: validity === '0', durationMinutes: validity === 'custom' ? Number($('manual-rule-duration').value) : Number(validity),
+      reason: $('manual-rule-reason').value.trim()
+    };
+  }
+  function renderManualRules(data) {
+    state.manualRuleItems = data.items || []; state.manualRuleTotal = data.total || 0; state.manualRulePage = data.page || 1;
+    const totalPages = Math.max(1, Math.ceil(state.manualRuleTotal / (data.pageSize || 100)));
+    $('manual-rule-page-summary').textContent = `共 ${state.manualRuleTotal} 条 · 每页最多 100 条`;
+    $('manual-rule-page').textContent = `${state.manualRulePage} / ${totalPages}`;
+    $('manual-rule-prev').disabled = state.manualRulePage <= 1; $('manual-rule-next').disabled = state.manualRulePage >= totalPages;
+    const body = $('manual-rules-body'); body.replaceChildren();
+    if (!state.manualRuleItems.length) return emptyRow(body, '当前筛选条件下没有人工规则。', 8);
+    for (const item of state.manualRuleItems) {
+      const tr = node('tr'); tr.dataset.id = item.id; tr.dataset.kind = item.kind;
+      const expired = item.expiresAt && new Date(item.expiresAt).getTime() <= Date.now();
+      const statusText = expired ? '已到期' : (item.enabled ? '启用' : '停用');
+      const status = node('td'); status.dataset.label = '类型 / 状态'; status.append(chip(`${item.ruleType === 'signal' ? '信号' : '身份'} · ${statusText}`, item.enabled && !expired));
+      const range = node('td', item.siteKey === '*' ? '所有站点' : (item.siteName || item.siteKey)); range.dataset.label = '范围';
+      const target = node('td', `${manualTargetLabel(item.targetType)}\n${item.targetValue}`); target.dataset.label = '匹配对象';
+      const action = node('td', `${manualActionLabel(item.action)}${item.ruleType === 'signal' ? `\n${item.mode === 'shadow' ? '仅观察' : '正式执行'}` : ''}`); action.dataset.label = '动作 / 模式';
+      const validity = item.ruleType === 'signal'
+        ? (item.permanent ? '永久处置' : `命中后 ${item.durationMinutes} 分钟`)
+        : (item.expiresAt ? `至 ${formatDate(item.expiresAt)}` : '永久有效');
+      const validityCell = node('td', validity); validityCell.dataset.label = '期限 / 处置时长';
+      const reason = node('td', item.reason || '—'); reason.dataset.label = '原因';
+      const hits = node('td', item.ruleType === 'identity' ? `${item.hitCount || 0} 次\n${item.lastHitAt ? formatDate(item.lastHitAt) : '尚未命中'}` : '—'); hits.dataset.label = '命中';
+      const controls = node('td', '', 'action-column'); controls.dataset.label = '操作'; controls.append(actionButton('编辑','edit-manual-rule'), actionButton(item.enabled ? '停用' : '启用','toggle-manual-rule'), actionButton('删除','delete-manual-rule','danger'));
+      tr.append(status, range, target, action, validityCell, reason, hits, controls); body.append(tr);
+    }
+  }
+
+  function editManualRule(item) {
+    state.editingManualRule = item; $('manual-rule-type').value = item.ruleType; updateManualRuleEditor();
+    $('manual-rule-site').value = item.siteKey; $('manual-rule-target-type').value = item.targetType; $('manual-rule-target-value').value = item.targetValue;
+    $('manual-rule-action').value = item.action; $('manual-rule-mode').value = item.mode || 'enforce'; $('manual-rule-reason').value = item.reason || '';
+    if (item.ruleType === 'signal') $('manual-rule-validity').value = item.permanent ? '0' : 'custom';
+    else $('manual-rule-validity').value = item.expiresAt ? 'custom' : '0';
+    const minutes = item.ruleType === 'signal' ? item.durationMinutes : Math.max(1, Math.ceil((new Date(item.expiresAt).getTime() - Date.now()) / 60000));
+    $('manual-rule-duration').value = Number.isFinite(minutes) && minutes > 0 ? String(minutes) : '60'; $('manual-rule-duration').hidden = $('manual-rule-validity').value !== 'custom';
+    $('manual-rule-submit').textContent = '保存修改'; $('manual-rule-cancel-edit').hidden = false; $('manual-rule-target-value').focus();
   }
 
   async function loadDetection() {
@@ -358,31 +475,6 @@
       tr.append(name, node('td', item.category), status, node('td', confidenceLabels[item.confidence] || item.confidence), score,
         node('td', `${item.events} 次 / ${item.visitors} 人`, 'numeric'), node('td', formatDate(item.lastSeen)), node('td', item.implementationNote));
       body.append(tr);
-    }
-  }
-
-  async function loadIdentityLists() {
-    const identities = await request(`/admin/api/detection/identity-lists?${identityQuery()}`);
-    const identityData = identities.data || { items: [], total: 0, page: 1, pageSize: 100 };
-    state.identityItems = identityData.items || []; state.identityTotal = identityData.total || 0; state.identityPage = identityData.page || 1;
-    const totalPages = Math.max(1, Math.ceil(state.identityTotal / (identityData.pageSize || 100)));
-    $('identity-page-summary').textContent = `共 ${state.identityTotal} 条 · 每页最多 100 条`;
-    $('identity-page').textContent = `${state.identityPage} / ${totalPages}`;
-    $('identity-prev').disabled = state.identityPage <= 1; $('identity-next').disabled = state.identityPage >= totalPages;
-    const identityBody = $('identity-body'); identityBody.replaceChildren();
-    if (!state.identityItems.length) emptyRow(identityBody, '当前筛选条件下没有名单项。', 7);
-    for (const item of state.identityItems) {
-      const tr = node('tr'); tr.dataset.id = item.id; tr.dataset.listType = item.listType;
-      const action = node('td', '', 'action-column'); action.dataset.label = '操作';
-      action.append(actionButton('编辑', 'edit-identity'), actionButton(item.enabled ? '停用' : '启用', 'toggle-identity'), actionButton('删除', 'delete-identity', 'danger'));
-      const status = node('td'); status.dataset.label = '名单 / 状态'; status.append(chip(`${item.listType === 'allow' ? '允许' : '阻止'} · ${item.enabled ? '启用' : '停用'}`, item.enabled));
-      const range = node('td', item.siteKey === '*' ? '所有站点' : item.siteKey); range.dataset.label = '范围';
-      const subject = node('td', `${item.subjectType}\n${item.subjectHash}`); subject.dataset.label = '对象';
-      const expiry = node('td', item.expiresAt ? formatDate(item.expiresAt) : '永久'); expiry.dataset.label = '有效期';
-      const reason = node('td', item.reason || '—'); reason.dataset.label = '原因';
-      const hits = node('td', `${item.hitCount || 0} 次\n${item.lastHitAt ? formatDate(item.lastHitAt) : '尚未命中'}`); hits.dataset.label = '命中';
-      tr.append(status, range, subject, expiry, reason, hits, action);
-      identityBody.append(tr);
     }
   }
 
@@ -616,7 +708,7 @@
     if (state.activeTab === 'connections') await loadQuality();
     else if (state.activeTab === 'suspects') { await loadSuspects(); if ($('analysis-backup-details').open) await loadDriveSettings(); }
     else if (state.activeTab === 'detection') await loadDetection();
-    else if (state.activeTab === 'rules') await Promise.all([loadRules(), loadIdentityLists()]);
+    else if (state.activeTab === 'rules') await loadRules();
     else if (state.activeTab === 'alerts') await loadAlerts();
     else if (state.activeTab === 'maintenance') await loadMaintenance();
     else if (state.activeTab === 'security') await loadSecurity();
@@ -629,7 +721,6 @@
     state.activeTab = name;
     document.querySelectorAll('.tab').forEach(item => item.classList.toggle('active', item === tab));
     document.querySelectorAll('.tab-panel').forEach(panel => { panel.hidden = panel.id !== `panel-${name}`; });
-    $('identity-rules-section').hidden = name !== 'rules';
     if (load) loadActiveTab().catch(error => toast(error.message));
   }
 
@@ -663,11 +754,48 @@
   $('suspect-action-form').addEventListener('submit', async event => { event.preventDefault(); if (!state.currentSuspect) return; const applyToAllSites = $('suspect-apply-all-sites').checked; const ruleSignal = $('suspect-rule-signal').value; if (applyToAllSites && !confirm(`将把风险信号“${ruleSignal}”的同类处置应用到所有接入站点，确定继续吗？`)) return; try { const { siteKey, visitorHash } = state.currentSuspect; const result = await request(`/admin/api/risk/suspects/${encodeURIComponent(siteKey)}/${visitorHash}/action`, { method: 'POST', body: JSON.stringify({ action: $('suspect-action').value, durationMinutes: Number($('suspect-duration').value), permanent: $('suspect-permanent').checked, reason: $('suspect-reason').value.trim(), applyToAllSites, ruleSignal: applyToAllSites ? ruleSignal : '' }) }); $('suspect-dialog').close(); toast(result.message || ($('suspect-permanent').checked ? '永久人工处置已生效' : '人工处置已生效')); await loadSuspects(); } catch (error) { toast(error.message); } });
   $('clear-suspect-action').addEventListener('click', async () => { if (!state.currentSuspect) return; const { siteKey, visitorHash } = state.currentSuspect; try { await request(`/admin/api/risk/suspects/${encodeURIComponent(siteKey)}/${visitorHash}/action`, { method: 'DELETE' }); $('suspect-dialog').close(); toast('人工处置已解除'); await loadSuspects(); } catch (error) { toast(error.message); } });
 
-  $('rule-scope').addEventListener('change', event => { const anySite = event.currentTarget.value === 'all'; $('rule-site').disabled = anySite; $('rule-site').required = !anySite; });
-  $('rule-permanent').addEventListener('change', event => { $('rule-duration').disabled = event.currentTarget.checked; $('rule-duration').required = !event.currentTarget.checked; });
-  $('preview-rule').addEventListener('click', async () => { try { const siteKey = $('rule-scope').value === 'all' ? '*' : $('rule-site').value; const query = new URLSearchParams({ siteKey, signal: $('rule-signal').value.trim() }); const result = await request(`/admin/api/risk/rules/preview?${query}`); $('rule-preview-result').textContent = `近 24 小时将影响 ${result.data.visitors24h} 个访客、${result.data.events24h} 次事件。`; } catch (error) { toast(error.message); } });
-  $('rule-form').addEventListener('submit', async event => { event.preventDefault(); try { const siteKey = $('rule-scope').value === 'all' ? '*' : $('rule-site').value; await request('/admin/api/risk/rules', { method: 'POST', body: JSON.stringify({ siteKey, signal: $('rule-signal').value.trim(), action: $('rule-action').value, mode: $('rule-mode').value, permanent: $('rule-permanent').checked, durationMinutes: $('rule-permanent').checked ? null : Number($('rule-duration').value), reason: $('rule-reason').value.trim() }) }); toast($('rule-mode').value === 'shadow' ? '影子规则已创建，不会执行处置' : '正式规则已创建'); $('rule-signal').value = ''; $('rule-reason').value = ''; $('rule-permanent').checked = false; $('rule-duration').disabled = false; $('rule-duration').required = true; await loadRules(); } catch (error) { toast(error.message); } });
-  $('rules-body').addEventListener('click', async event => { const button = event.target.closest('[data-action]'); const row = button?.closest('tr'); if (!row) return; try { if (button.dataset.action === 'delete-rule') { if (!confirm('确定删除该规则吗？修订历史仍会保留。')) return; await request(`/admin/api/risk/rules/${row.dataset.ruleId}`, { method: 'DELETE' }); } else { const enabled = row.children[5].textContent !== '已启用'; await request(`/admin/api/risk/rules/${row.dataset.ruleId}/status`, { method: 'PUT', body: JSON.stringify({ enabled }) }); } await loadRules(); toast('规则已更新'); } catch (error) { toast(error.message); } });
+  installManualRuleControls();
+  resetManualRuleEditor();
+  installMaintenanceScopeFilter();
+  $('manual-rule-type').addEventListener('change', updateManualRuleEditor);
+  $('manual-rule-validity').addEventListener('change', event => { $('manual-rule-duration').hidden = event.currentTarget.value !== 'custom'; });
+  $('preview-manual-rule').addEventListener('click', async () => {
+    try {
+      const query = new URLSearchParams({ siteKey: $('manual-rule-site').value, signal: $('manual-rule-target-value').value.trim() });
+      const result = await request(`/admin/api/manual-rules/preview?${query}`);
+      $('manual-rule-preview-result').textContent = `近 24 小时将影响 ${result.data.visitors24h} 个访客、${result.data.events24h} 次事件。`;
+    } catch (error) { $('manual-rule-form-error').textContent = error.message; }
+  });
+  $('manual-rule-form').addEventListener('submit', async event => {
+    event.preventDefault(); $('manual-rule-form-error').textContent = '';
+    try {
+      const payload = manualRulePayload();
+      if (!payload.targetValue || payload.reason.length < 2) { $('manual-rule-form-error').textContent = '请填写匹配值和至少 2 个字的设置原因。'; return; }
+      const editing = state.editingManualRule;
+      const path = editing ? `/admin/api/manual-rules/${editing.kind}/${editing.id}` : '/admin/api/manual-rules';
+      const result = await request(path, { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+      toast(result.message); resetManualRuleEditor(); await loadRules();
+    } catch (error) { $('manual-rule-form-error').textContent = error.message; toast(error.message); }
+  });
+  $('manual-rules-body').addEventListener('click', async event => {
+    const button = event.target.closest('[data-action]'); const row = button?.closest('tr'); if (!row) return;
+    const item = state.manualRuleItems.find(entry => String(entry.id) === row.dataset.id && entry.kind === row.dataset.kind); if (!item) return;
+    if (button.dataset.action === 'edit-manual-rule') return editManualRule(item);
+    try {
+      if (button.dataset.action === 'delete-manual-rule') {
+        if (!confirm('确定删除该人工规则吗？该操作会写入审计日志。')) return;
+        await request(`/admin/api/manual-rules/${item.kind}/${item.id}`, { method: 'DELETE' });
+      } else if (button.dataset.action === 'toggle-manual-rule') {
+        await request(`/admin/api/manual-rules/${item.kind}/${item.id}/status`, { method: 'PUT', body: JSON.stringify({ enabled: !item.enabled }) });
+      } else return;
+      toast('人工规则已更新'); await loadRules();
+    } catch (error) { toast(error.message); }
+  });
+  $('manual-rule-cancel-edit').addEventListener('click', resetManualRuleEditor);
+  for (const id of ['manual-rule-filter-type','manual-rule-filter-action','manual-rule-filter-site','manual-rule-filter-target','manual-rule-filter-status']) $(id).addEventListener('change', () => { state.manualRulePage=1; loadRules().catch(error=>toast(error.message)); });
+  let manualRuleSearchTimer; $('manual-rule-filter-keyword').addEventListener('input', () => { clearTimeout(manualRuleSearchTimer); manualRuleSearchTimer=setTimeout(()=>{state.manualRulePage=1;loadRules().catch(error=>toast(error.message));},250); });
+  $('manual-rule-prev').addEventListener('click',()=>{if(state.manualRulePage>1){state.manualRulePage-=1;loadRules().catch(error=>toast(error.message));}});
+  $('manual-rule-next').addEventListener('click',()=>{state.manualRulePage+=1;loadRules().catch(error=>toast(error.message));});
   $('policy-form').addEventListener('submit', async event => {
     event.preventDefault();
     try {
@@ -687,53 +815,8 @@
     catch (error) { toast(error.message); }
   });
 
-  installIdentityControls();
-  installMaintenanceScopeFilter();
   $('detection-range').addEventListener('change', () => loadDetection().catch(error => toast(error.message)));
   $('quality-range').addEventListener('change', () => loadQuality().catch(error => toast(error.message)));
-  $('identity-validity').addEventListener('change', event => {
-    const custom = event.currentTarget.value === 'custom'; $('identity-duration').hidden = !custom;
-    $('identity-permanent').checked = event.currentTarget.value === '0';
-    if (!custom && event.currentTarget.value !== '0') $('identity-duration').value = event.currentTarget.value;
-  });
-  $('identity-subject-type').addEventListener('change', event => {
-    const help = { visitor: '填写风险中心显示的访客摘要，区分大小写。', bot_identity: '例如 Googlebot、GPTBot；保存时会转为小写。', ua: '填写稳定且尽量具体的 User-Agent 片段。', ja4: '填写完整 JA4 指纹。', asn: '只填写数字，例如 15169。' };
-    $('identity-subject-help').textContent = help[event.currentTarget.value] || '';
-  });
-  $('identity-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    try {
-      $('identity-form-error').textContent = '';
-      const subjectHash = $('identity-subject').value.trim(); const reason = $('identity-reason').value.trim();
-      if (!subjectHash || reason.length < 2) { $('identity-form-error').textContent = '请填写有效对象值和至少 2 个字的处置原因。'; return; }
-      const path = state.editingIdentity ? `/admin/api/detection/identity-lists/${state.editingIdentity.listType}/${state.editingIdentity.id}` : '/admin/api/detection/identity-lists';
-      const result = await request(path, { method: state.editingIdentity ? 'PUT' : 'POST', body: JSON.stringify({
-        listType: $('identity-list-type').value, siteKey: $('identity-site').value,
-        subjectType: $('identity-subject-type').value, subjectHash,
-        reason, permanent: $('identity-permanent').checked,
-        durationMinutes: Number($('identity-duration').value)
-      }) });
-      toast(result.message); resetIdentityEditor(); await loadIdentityLists();
-    } catch (error) { $('identity-form-error').textContent = error.message; toast(error.message); }
-  });
-  $('identity-body').addEventListener('click', async event => {
-    const button = event.target.closest('[data-action]'); const row = button?.closest('tr'); if (!row) return;
-    const item = state.identityItems.find(entry => String(entry.id) === row.dataset.id && entry.listType === row.dataset.listType); if (!item) return;
-    if (button.dataset.action === 'edit-identity') {
-      state.editingIdentity = item; $('identity-list-type').value=item.listType; $('identity-list-type').disabled=true; $('identity-site').value=item.siteKey; $('identity-subject-type').value=item.subjectType; $('identity-subject').value=item.subjectHash; $('identity-reason').value=item.reason || '';
-      $('identity-validity').value = item.expiresAt ? 'custom' : '0'; $('identity-permanent').checked=!item.expiresAt; $('identity-duration').hidden=!item.expiresAt; $('identity-duration').value=item.expiresAt ? String(Math.max(1,Math.ceil((new Date(item.expiresAt).getTime()-Date.now())/60000))) : '60'; $('identity-submit').textContent='保存修改'; $('identity-cancel-edit').hidden=false; $('identity-subject').focus(); return;
-    }
-    if (button.dataset.action === 'toggle-identity') { try { const result=await request(`/admin/api/detection/identity-lists/${item.listType}/${item.id}/toggle`,{method:'POST'}); toast(result.message); await loadIdentityLists(); } catch(error){toast(error.message);} return; }
-    if (button.dataset.action !== 'delete-identity' || !confirm('确定删除该名单项吗？该操作会写入审计日志。')) return;
-    try { await request(`/admin/api/detection/identity-lists/${row.dataset.listType}/${row.dataset.id}`, { method: 'DELETE' }); toast('名单项已删除'); await loadIdentityLists(); }
-    catch (error) { toast(error.message); }
-  });
-  $('identity-cancel-edit').addEventListener('click', resetIdentityEditor);
-  for (const id of ['identity-filter-list','identity-filter-site','identity-filter-subject','identity-filter-status']) $(id).addEventListener('change', () => { state.identityPage=1; loadIdentityLists().catch(error=>toast(error.message)); });
-  let identitySearchTimer; $('identity-filter-keyword').addEventListener('input', () => { clearTimeout(identitySearchTimer); identitySearchTimer=setTimeout(()=>{state.identityPage=1; loadIdentityLists().catch(error=>toast(error.message));},250); });
-  $('identity-prev').addEventListener('click',()=>{if(state.identityPage>1){state.identityPage-=1;loadIdentityLists().catch(error=>toast(error.message));}});
-  $('identity-next').addEventListener('click',()=>{state.identityPage+=1;loadIdentityLists().catch(error=>toast(error.message));});
-
   $('credential-form').addEventListener('submit', async event => {
     event.preventDefault();
     const nextPassword = $('security-new-password').value;

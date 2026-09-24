@@ -170,43 +170,104 @@ async function clearSuspectAction(req, res) {
   return res.json({ code: 200, data: { removed }, message: '人工处置已解除' });
 }
 
-async function rules(req, res) {
-  return res.json({ code: 200, data: await StorageService.listSignalRules() });
+async function manualRules(req, res) {
+  return res.json({ code: 200, data: await StorageService.listManualRules({
+    page: req.query.page, pageSize: req.query.pageSize,
+    ruleType: String(req.query.ruleType || ''), action: String(req.query.action || ''),
+    siteKey: String(req.query.siteKey || ''), targetType: String(req.query.targetType || ''),
+    status: String(req.query.status || ''), keyword: String(req.query.keyword || '').trim()
+  }) });
 }
 
-async function previewRule(req, res) {
-  return res.json({ code: 200, data: await StorageService.previewSignalRule(
-    String(req.query.siteKey || ''), String(req.query.signal || '')
-  ) });
-}
-
-async function createRule(req, res) {
-  const input = req.body || {};
-  input.permanent = input.permanent === true;
-  input.mode = input.mode === 'shadow' ? 'shadow' : 'enforce';
-  const validRuleSite = input.siteKey === '*' || validSiteKey(input.siteKey);
-  if (!validRuleSite || !/^[a-z0-9_-]{2,64}$/i.test(String(input.signal || ''))
-    || !['allow', 'observe', 'silent_challenge', 'strong_challenge', 'deny'].includes(String(input.action || ''))) {
-    return res.status(400).json({ code: 400, message: '规则参数无效' });
+async function previewManualRule(req, res) {
+  const siteKey = String(req.query.siteKey || '');
+  const signal = String(req.query.signal || '');
+  if (!(siteKey === '*' || validSiteKey(siteKey)) || !/^[a-z0-9_-]{2,64}$/i.test(signal)) {
+    return res.status(400).json({ code: 400, message: '请先填写有效的作用范围和风险信号' });
   }
-  const id = await StorageService.createSignalRule(input, actor(req));
-  RuleBackupService.scheduleChangedBackup();
-  return res.json({ code: 200, data: { id }, message: '信号规则已创建' });
+  return res.json({ code: 200, data: await StorageService.previewSignalRule(siteKey, signal) });
 }
 
-async function setRuleStatus(req, res) {
-  if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ code: 400, message: '参数无效' });
-  const data = await StorageService.setSignalRuleEnabled(Number(req.params.id), req.body.enabled, actor(req));
+function normalizeManualRuleInput(input = {}) {
+  const ruleType = input.ruleType === 'identity' ? 'identity' : 'signal';
+  const siteKey = String(input.siteKey || '');
+  const reason = String(input.reason || '').trim();
+  if (!(siteKey === '*' || validSiteKey(siteKey)) || reason.length < 2 || reason.length > 300) return null;
+  if (ruleType === 'identity') {
+    const action = String(input.action || '');
+    if (!['allow', 'block'].includes(action)) return null;
+    const identity = normalizeIdentityInput({
+      listType: action, siteKey, subjectType: input.targetType,
+      subjectHash: input.targetValue, reason,
+      permanent: input.permanent === true, durationMinutes: input.durationMinutes
+    });
+    return identity ? { ...identity, ruleType, action, permanent: input.permanent === true } : null;
+  }
+  const signal = String(input.targetValue || input.signal || '').trim();
+  const action = String(input.action || '');
+  if (!/^[a-z0-9_-]{2,64}$/i.test(signal)
+    || !['allow', 'observe', 'silent_challenge', 'strong_challenge', 'deny'].includes(action)) return null;
+  return {
+    ruleType, siteKey, signal, targetValue: signal, targetType: 'signal', action, reason,
+    mode: input.mode === 'shadow' ? 'shadow' : 'enforce',
+    permanent: input.permanent === true,
+    durationMinutes: input.permanent === true ? null : Math.max(1, Math.min(43200, Number(input.durationMinutes) || 60))
+  };
+}
+
+async function createManualRule(req, res) {
+  const input = normalizeManualRuleInput(req.body);
+  if (!input) return res.status(400).json({ code: 400, message: '请检查匹配对象、动作、范围和原因' });
+  try {
+    const data = await StorageService.createManualRule(input, actor(req));
+    RuleBackupService.scheduleChangedBackup();
+    return res.json({ code: 200, data, message: '人工规则已创建' });
+  } catch (error) {
+    if (error.code === 'IDENTITY_CONFLICT') return res.status(409).json({ code: 409, message: error.message });
+    throw error;
+  }
+}
+
+async function updateManualRule(req, res) {
+  const kind = String(req.params.kind || '');
+  if (!['signal', 'allow', 'block'].includes(kind)) return res.status(400).json({ code: 400, message: '规则类型无效' });
+  const input = normalizeManualRuleInput(req.body);
+  if (!input || (kind === 'signal') !== (input.ruleType === 'signal')) {
+    return res.status(400).json({ code: 400, message: '编辑时不能改变匹配方式，请新建规则' });
+  }
+  try {
+    const data = await StorageService.updateManualRule(kind, Number(req.params.id), input, actor(req));
+    if (!data) return res.status(404).json({ code: 404, message: '规则不存在' });
+    RuleBackupService.scheduleChangedBackup();
+    return res.json({ code: 200, data, message: '人工规则已更新' });
+  } catch (error) {
+    if (error.code === 'IDENTITY_CONFLICT') return res.status(409).json({ code: 409, message: error.message });
+    throw error;
+  }
+}
+
+async function setManualRuleStatus(req, res) {
+  const kind = String(req.params.kind || '');
+  if (!['signal', 'allow', 'block'].includes(kind) || typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ code: 400, message: '规则类型或状态无效' });
+  }
+  const data = await StorageService.setManualRuleEnabled(kind, Number(req.params.id), req.body.enabled, actor(req));
   if (!data) return res.status(404).json({ code: 404, message: '规则不存在' });
   RuleBackupService.scheduleChangedBackup();
   return res.json({ code: 200, data, message: data.enabled ? '规则已启用' : '规则已停用' });
 }
 
-async function deleteRule(req, res) {
-  const removed = await StorageService.deleteSignalRule(Number(req.params.id), actor(req));
+async function deleteManualRule(req, res) {
+  const kind = String(req.params.kind || '');
+  if (!['signal', 'allow', 'block'].includes(kind)) return res.status(400).json({ code: 400, message: '规则类型无效' });
+  const removed = await StorageService.deleteManualRule(kind, Number(req.params.id), actor(req));
   if (!removed) return res.status(404).json({ code: 404, message: '规则不存在' });
   RuleBackupService.scheduleChangedBackup();
-  return res.json({ code: 200, message: '规则已删除' });
+  return res.json({ code: 200, message: '人工规则已删除' });
+}
+
+async function manualRuleRevisions(req, res) {
+  return res.json({ code: 200, data: await StorageService.listManualRuleRevisions(req.query.limit) });
 }
 
 async function ruleBackupSettings(req, res) {
@@ -585,8 +646,9 @@ module.exports = {
   page, stylesheet, script, login, session, logout, overview, sites, setSiteStatus,
   saveIntegration, setSiteControls, setClientStatus, rotateClientSecret,
   riskSummary, suspects, suspectDetail, setSuspectAction, clearSuspectAction,
-  rules, previewRule, createRule, setRuleStatus, deleteRule, ruleRevisions, policies, createPolicy, activatePolicy, audits,
-  detectionCapabilities, detectionQuality, pipelineHealth, identityEntries, saveIdentityEntry, updateIdentityEntry, toggleIdentityEntry, deleteIdentityEntry,
+  manualRules, previewManualRule, createManualRule, updateManualRule, setManualRuleStatus, deleteManualRule, manualRuleRevisions,
+  policies, createPolicy, activatePolicy, audits,
+  detectionCapabilities, detectionQuality, pipelineHealth,
   securityOverview, saveGitHubApiToken, changeCredentials, revokeSession, revokeOtherSessions, revokeAllSessions,
   alertSettings, saveAlertSettings, alertActivity, testAlert,
   ruleBackupSettings, saveRuleBackupSettings, ruleBackupStatus, testRuleBackup, runRuleBackup, retryRuleBackup,

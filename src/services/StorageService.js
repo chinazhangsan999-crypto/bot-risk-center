@@ -74,7 +74,7 @@ async function initialize() {
   if (ready) return;
   if (DATABASE_URL) {
     pool = new Pool({ connectionString: DATABASE_URL, max: 10, idleTimeoutMillis: 30_000 });
-    for (const filename of ['001_initial.sql', '002_alerting.sql', '003_maintenance.sql', '004_agent_maintenance.sql', '005_analysis_drive.sql', '006_personal_drive_oauth.sql', '007_rule_telegram_backup.sql', '008_detection_security.sql', '009_identity_controls.sql', '010_maintenance_component_inventory.sql', '011_github_api_settings.sql']) {
+    for (const filename of ['001_initial.sql', '002_alerting.sql', '003_maintenance.sql', '004_agent_maintenance.sql', '005_analysis_drive.sql', '006_personal_drive_oauth.sql', '007_rule_telegram_backup.sql', '008_detection_security.sql', '009_identity_controls.sql', '010_maintenance_component_inventory.sql', '011_github_api_settings.sql', '012_unified_manual_rules.sql']) {
       const migration = fs.readFileSync(path.join(__dirname, '..', '..', 'migrations', filename), 'utf8');
       await pool.query(migration);
     }
@@ -1065,6 +1065,31 @@ async function createSignalRule(input, actor = 'risk-admin') {
   return Number(result.rows[0].id);
 }
 
+async function updateSignalRule(id, input, actor = 'risk-admin') {
+  if (!pool || !ACTIONS.has(input.action)) return null;
+  const permanent = input.permanent === true;
+  const minutes = permanent ? null : Math.max(1, Math.min(43_200, Number(input.durationMinutes) || 60));
+  const result = await pool.query(
+    `UPDATE signal_rules SET
+       site_key=$2,signal=$3,action=$4,reason=$5,duration_minutes=$6,
+       mode=CASE WHEN $7::text='shadow' THEN 'shadow' ELSE 'enforce' END,
+       revision=revision+1,updated_at=NOW()
+     WHERE id=$1 RETURNING id`,
+    [id, input.siteKey, input.signal, input.action, input.reason || '', minutes, input.mode]
+  );
+  if (!result.rows[0]) return null;
+  await pool.query(
+    `INSERT INTO signal_rule_revisions (rule_id,operation,snapshot,created_by)
+     SELECT id,'update',to_jsonb(signal_rules),$2 FROM signal_rules WHERE id=$1`,
+    [id, actor]
+  );
+  await recordAdminAudit(actor, 'update_signal_rule', String(id), {
+    siteKey: input.siteKey, signal: input.signal, action: input.action,
+    mode: input.mode, permanent, durationMinutes: minutes, reason: input.reason || ''
+  });
+  return { id: Number(id), kind: 'signal' };
+}
+
 async function setSignalRuleEnabled(id, enabled, actor = 'risk-admin') {
   if (!pool) return null;
   const result = await pool.query(
@@ -1466,6 +1491,148 @@ async function deleteIdentityEntry(listType, id, actor) {
   const result = await pool.query(`DELETE FROM ${table} WHERE id=$1`, [id]);
   if (result.rowCount) await recordAdminAudit(actor, `delete_${listType}_entry`, String(id));
   return result.rowCount > 0;
+}
+
+async function listManualRules(filters = {}) {
+  if (!pool) return { items: [], total: 0, page: 1, pageSize: 100 };
+  const page = Math.max(1, Number(filters.page) || 1);
+  const pageSize = Math.max(1, Math.min(100, Number(filters.pageSize) || 100));
+  const params = [];
+  const clauses = [];
+  const add = value => { params.push(value); return `$${params.length}`; };
+  if (filters.ruleType === 'signal') clauses.push("rule_type='signal'");
+  if (filters.ruleType === 'identity') clauses.push("rule_type='identity'");
+  if (['allow', 'block', 'observe', 'silent_challenge', 'strong_challenge', 'deny'].includes(filters.action)) {
+    clauses.push(`action=${add(filters.action)}`);
+  }
+  if (filters.siteKey) clauses.push(`site_key=${add(filters.siteKey)}`);
+  if (filters.targetType) clauses.push(`target_type=${add(filters.targetType)}`);
+  if (filters.status === 'enabled') clauses.push('enabled=TRUE AND (expires_at IS NULL OR expires_at>NOW())');
+  if (filters.status === 'disabled') clauses.push('enabled=FALSE');
+  if (filters.status === 'expired') clauses.push('expires_at IS NOT NULL AND expires_at<=NOW()');
+  if (filters.keyword) {
+    const keyword = add(`%${String(filters.keyword).slice(0, 120)}%`);
+    clauses.push(`(target_value ILIKE ${keyword} OR reason ILIKE ${keyword} OR site_name ILIKE ${keyword})`);
+  }
+  const source = `
+    SELECT 'signal'::text AS kind,'signal'::text AS rule_type,r.id,r.site_key,
+           COALESCE(s.name,'任意站点') AS site_name,'signal'::text AS target_type,
+           r.signal AS target_value,r.action,r.mode,r.reason,r.enabled,
+           r.duration_minutes,r.expires_at,0::bigint AS hit_count,NULL::timestamptz AS last_hit_at,
+           r.created_at,r.updated_at
+      FROM signal_rules r LEFT JOIN sites s ON s.site_key=r.site_key
+    UNION ALL
+    SELECT 'allow'::text,'identity'::text,a.id,a.site_key,
+           COALESCE(s.name,'所有站点'),a.subject_type,a.subject_hash,'allow'::text,'enforce'::text,
+           a.reason,a.enabled,NULL::integer,a.expires_at,a.hit_count,a.last_hit_at,a.created_at,a.updated_at
+      FROM allowlists a LEFT JOIN sites s ON s.site_key=a.site_key
+    UNION ALL
+    SELECT 'block'::text,'identity'::text,b.id,b.site_key,
+           COALESCE(s.name,'所有站点'),b.subject_type,b.subject_hash,'block'::text,'enforce'::text,
+           b.reason,b.enabled,NULL::integer,b.expires_at,b.hit_count,b.last_hit_at,b.created_at,b.updated_at
+      FROM blocklists b LEFT JOIN sites s ON s.site_key=b.site_key`;
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const count = await pool.query(`SELECT COUNT(*)::int AS total FROM (${source}) manual_rules ${where}`, params);
+  const limit = add(pageSize);
+  const offset = add((page - 1) * pageSize);
+  const result = await pool.query(
+    `SELECT * FROM (${source}) manual_rules ${where}
+      ORDER BY updated_at DESC,created_at DESC,kind,id DESC LIMIT ${limit} OFFSET ${offset}`,
+    params
+  );
+  return {
+    items: result.rows.map(row => ({
+      kind: row.kind, ruleType: row.rule_type, id: Number(row.id),
+      siteKey: row.site_key, siteName: row.site_name,
+      targetType: row.target_type, targetValue: row.target_value,
+      action: row.action, mode: row.mode, reason: row.reason || '',
+      enabled: Boolean(row.enabled), permanent: row.rule_type === 'signal' ? row.duration_minutes == null : row.expires_at == null,
+      durationMinutes: row.duration_minutes == null ? null : Number(row.duration_minutes),
+      expiresAt: row.expires_at, hitCount: Number(row.hit_count) || 0,
+      lastHitAt: row.last_hit_at, createdAt: row.created_at, updatedAt: row.updated_at
+    })),
+    total: Number(count.rows[0]?.total) || 0, page, pageSize
+  };
+}
+
+async function moveIdentityRule(sourceType, id, input, actor = 'risk-admin') {
+  const targetType = input.listType;
+  if (sourceType === targetType) {
+    const updated = await updateIdentityEntry(sourceType, id, input, actor);
+    return updated ? { id: Number(id), kind: targetType } : null;
+  }
+  if (!pool || !['allow', 'block'].includes(sourceType) || !['allow', 'block'].includes(targetType)) return null;
+  const sourceTable = sourceType === 'block' ? 'blocklists' : 'allowlists';
+  const targetTable = targetType === 'block' ? 'blocklists' : 'allowlists';
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query(`SELECT enabled,hit_count,last_hit_at,created_at FROM ${sourceTable} WHERE id=$1 FOR UPDATE`, [id]);
+    if (!current.rows[0]) { await client.query('ROLLBACK'); return null; }
+    const conflict = await client.query(
+      `SELECT id FROM ${targetTable} WHERE site_key=$1 AND subject_type=$2 AND subject_hash=$3`,
+      [input.siteKey, input.subjectType, input.subjectHash]
+    );
+    if (conflict.rowCount) {
+      const error = new Error('修改后的处理动作与现有人工规则冲突');
+      error.code = 'IDENTITY_CONFLICT';
+      throw error;
+    }
+    const inserted = await client.query(
+      `INSERT INTO ${targetTable}
+        (site_key,subject_type,subject_hash,reason,expires_at,enabled,hit_count,last_hit_at,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,CASE WHEN $5::int>0 THEN NOW()+($5*INTERVAL '1 minute') ELSE NULL END,
+               $6,$7,$8,$9,NOW()) RETURNING id`,
+      [input.siteKey, input.subjectType, input.subjectHash, input.reason || '', Number(input.durationMinutes) || 0,
+        Boolean(current.rows[0].enabled), Number(current.rows[0].hit_count) || 0,
+        current.rows[0].last_hit_at, current.rows[0].created_at]
+    );
+    await client.query(`DELETE FROM ${sourceTable} WHERE id=$1`, [id]);
+    await client.query(
+      `INSERT INTO admin_audits(actor,action,target,details)
+       VALUES($1,'change_identity_rule_action',$2,$3::jsonb)`,
+      [actor, `${sourceType}:${id}`, JSON.stringify({ from: sourceType, to: targetType, newId: Number(inserted.rows[0].id) })]
+    );
+    await client.query('COMMIT');
+    return { id: Number(inserted.rows[0].id), kind: targetType };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
+async function createManualRule(input, actor = 'risk-admin') {
+  if (input.ruleType === 'signal') return { id: await createSignalRule(input, actor), kind: 'signal' };
+  return { id: await saveIdentityEntry(input, actor), kind: input.listType };
+}
+
+async function updateManualRule(kind, id, input, actor = 'risk-admin') {
+  if (kind === 'signal') return updateSignalRule(id, input, actor);
+  return moveIdentityRule(kind, id, input, actor);
+}
+
+async function setManualRuleEnabled(kind, id, enabled, actor = 'risk-admin') {
+  if (kind === 'signal') return setSignalRuleEnabled(id, enabled, actor);
+  if (!pool || !['allow', 'block'].includes(kind)) return null;
+  const table = kind === 'block' ? 'blocklists' : 'allowlists';
+  const result = await pool.query(
+    `UPDATE ${table} SET enabled=$2,updated_at=NOW() WHERE id=$1 RETURNING id,enabled`,
+    [id, enabled]
+  );
+  if (!result.rows[0]) return null;
+  await recordAdminAudit(actor, `${enabled ? 'enable' : 'disable'}_${kind}_entry`, String(id));
+  return { id: Number(id), enabled: Boolean(enabled), kind };
+}
+
+async function deleteManualRule(kind, id, actor = 'risk-admin') {
+  if (kind === 'signal') return deleteSignalRule(id, actor);
+  if (!['allow', 'block'].includes(kind)) return false;
+  return deleteIdentityEntry(kind, id, actor);
+}
+
+async function listManualRuleRevisions(limit = 100) {
+  const revisions = await listRuleRevisions(limit);
+  return revisions.map(({ createdBy, ...item }) => item);
 }
 
 async function listRuleRevisions(limit = 100) {
@@ -2668,8 +2835,15 @@ module.exports = {
   getUnifiedRuleBackupData,
   previewSignalRule,
   createSignalRule,
+  updateSignalRule,
   setSignalRuleEnabled,
   deleteSignalRule,
+  listManualRules,
+  createManualRule,
+  updateManualRule,
+  setManualRuleEnabled,
+  deleteManualRule,
+  listManualRuleRevisions,
   listRuleRevisions,
   listAdminAudits,
   recordAdminAudit,

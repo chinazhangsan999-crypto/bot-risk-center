@@ -61,5 +61,7 @@ test('完成摘要包含解密密钥与校验信息', () => {
 test('所有人工规则写入入口都会触发变更备份', () => {
   const controller = fs.readFileSync(path.join(__dirname, '..', 'src', 'controllers', 'AdminController.js'), 'utf8');
   assert.match(controller, /if \(applyToAllSites\) RuleBackupService\.scheduleChangedBackup\(\)/);
-  assert.equal((controller.match(/RuleBackupService\.scheduleChangedBackup\(\)/g) || []).length, 10);
+  for (const handler of ['createManualRule', 'updateManualRule', 'setManualRuleStatus', 'deleteManualRule']) {
+    assert.match(controller, new RegExp(`async function ${handler}[\\s\\S]*?RuleBackupService\\.scheduleChangedBackup\\(\\)`));
+  }
 });
